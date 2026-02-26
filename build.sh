@@ -9,6 +9,9 @@ if ! command -v mvn >/dev/null 2>&1; then
   exit 1
 fi
 
+echo "[build] cleanup..."
+rm -rf target/
+
 echo "[build] Packaging agent and verify jars..."
 mvn -DskipTests package
 
