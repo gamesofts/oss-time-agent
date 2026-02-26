@@ -54,10 +54,6 @@ public class OssVerifyMain {
             DefaultCredentialProvider provider = CredentialsProviderFactory.newDefaultCredentialProvider(ak, sk);
             client = new OSSClientBuilder().build(endpoint, provider, conf);
 
-            if (region != null && region.length() > 0) {
-                System.out.println("REGION_INFO " + region + " (not explicitly set on OSS client)");
-            }
-
             ObjectListing listing = client.listObjects(bucket);
             System.out.println("LIST_OK count=" + listing.getObjectSummaries().size());
 

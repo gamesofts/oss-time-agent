@@ -31,6 +31,7 @@ public final class OssTimeBridge {
             return new OssEndpointTimeSync().sync(endpoint, c);
         }
     };
+    private static final AtomicBoolean authoritativeClockReady = new AtomicBoolean(false);
     private static final AtomicBoolean globalPreSyncSucceeded = new AtomicBoolean(false);
     private static final AtomicBoolean globalPreSyncInFlight = new AtomicBoolean(false);
     private static final Object NULL_REFLECTION = new Object();
@@ -67,7 +68,10 @@ public final class OssTimeBridge {
     }
 
     public static long resolveTickOffsetMillis(long sdkTickOffset) {
-        return sdkTickOffset;
+        if (!authoritativeClockReady.get()) {
+            return sdkTickOffset;
+        }
+        return currentTickOffsetMillis();
     }
 
     public static void beforeInitialSign(Object serviceClient, Object requestMessage, Object executionContext) {
@@ -104,6 +108,7 @@ public final class OssTimeBridge {
                 long syncedNow = result.getEstimatedServerMillis();
                 long tickOffset = currentTickOffsetMillis();
                 boolean appliedToSdk = applyPreSyncTickOffset(serviceClient, executionContext, syncedNow, tickOffset);
+                authoritativeClockReady.set(true);
                 globalPreSyncSucceeded.set(true);
                 if (appliedToSdk) {
                     onConfigTickOffsetUpdatedFromPreSync(tickOffset);
@@ -134,9 +139,11 @@ public final class OssTimeBridge {
         }
         try {
             long currentOffset = getConfigTickOffset(serviceClient);
-            AgentLog.debug("resign retry with configTickOffset=" + currentOffset + "ms, retries=" + retries);
+            long resolvedOffset = resolveTickOffsetMillis(currentOffset);
+            AgentLog.debug("resign retry with configTickOffset=" + currentOffset + "ms"
+                    + ", resolvedTickOffset=" + resolvedOffset + "ms, retries=" + retries);
 
-            syncSignerTickOffset(executionContext, currentOffset);
+            syncSignerTickOffset(executionContext, resolvedOffset);
 
             clearSignatureHeaders(requestMessage);
 
@@ -198,6 +205,7 @@ public final class OssTimeBridge {
     }
 
     static void resetPreSyncStateForTest() {
+        authoritativeClockReady.set(false);
         globalPreSyncSucceeded.set(false);
         globalPreSyncInFlight.set(false);
     }

@@ -13,7 +13,16 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class OssTimeBridgeTest {
     @Test
+    public void testResolveTickOffsetMillisFallsBackToSdkBeforeAuthoritativeSync() {
+        OssTimeBridge.resetPreSyncStateForTest();
+
+        Assert.assertEquals(1234L, OssTimeBridge.resolveTickOffsetMillis(1234L));
+    }
+
+    @Test
     public void testResignForRetrySyncsTickOffsetAndClearsHeaders() {
+        OssTimeBridge.resetPreSyncStateForTest();
+
         FakeClientConfiguration cfg = new FakeClientConfiguration();
         cfg.tickOffset = 12345L;
         FakeServiceClient client = new FakeServiceClient(cfg);
@@ -38,6 +47,70 @@ public class OssTimeBridgeTest {
         Assert.assertFalse(req.headers.containsKey("Date"));
         Assert.assertFalse(req.headers.containsKey("Authorization"));
         Assert.assertEquals(Boolean.TRUE, req.signedMarker);
+    }
+
+    @Test
+    public void testResolveTickOffsetMillisUsesDynamicOffsetAfterPreSyncSuccess() throws Exception {
+        final com.gamesofts.osstimeagent.time.RealTimeClock clock = new com.gamesofts.osstimeagent.time.RealTimeClock();
+        OssTimeBridge.installClock(clock);
+        OssTimeBridge.installEndpointTimeSyncerForTest(new OssTimeBridge.EndpointTimeSyncer() {
+            public com.gamesofts.osstimeagent.time.OssEndpointTimeSync.SyncResult sync(URI endpoint, com.gamesofts.osstimeagent.time.RealTimeClock c) {
+                long t = System.currentTimeMillis() + 5000L;
+                c.updateBaseTimeAuthoritative(t);
+                return com.gamesofts.osstimeagent.time.OssEndpointTimeSync.SyncResult.success(t, "HEAD");
+            }
+        });
+        OssTimeBridge.resetPreSyncStateForTest();
+
+        FakeClientConfiguration cfg = new FakeClientConfiguration();
+        FakeServiceClient client = new FakeServiceClient(cfg);
+        FakeExecutionContext ctx = new FakeExecutionContext();
+        ctx.signer = new FakeSigner();
+        FakeRequestMessage req = new FakeRequestMessage();
+        req.endpoint = new URI("https://oss-cn-shanghai.aliyuncs.com/");
+
+        OssTimeBridge.beforeInitialSign(client, req, ctx);
+
+        long expected = OssTimeBridge.currentTickOffsetMillis();
+        long resolved = OssTimeBridge.resolveTickOffsetMillis(-777777L);
+
+        Assert.assertTrue(Math.abs(resolved - expected) < 200L);
+        Assert.assertTrue(resolved > 1000L);
+        Assert.assertNotEquals(-777777L, resolved);
+    }
+
+    @Test
+    public void testResignForRetryUsesDynamicOffsetAfterPreSyncSuccess() throws Exception {
+        final long target = System.currentTimeMillis() + 8000L;
+        final com.gamesofts.osstimeagent.time.RealTimeClock clock = new com.gamesofts.osstimeagent.time.RealTimeClock();
+        OssTimeBridge.installClock(clock);
+        OssTimeBridge.installEndpointTimeSyncerForTest(new OssTimeBridge.EndpointTimeSyncer() {
+            public com.gamesofts.osstimeagent.time.OssEndpointTimeSync.SyncResult sync(URI endpoint, com.gamesofts.osstimeagent.time.RealTimeClock c) {
+                c.updateBaseTimeAuthoritative(target);
+                return com.gamesofts.osstimeagent.time.OssEndpointTimeSync.SyncResult.success(target, "HEAD");
+            }
+        });
+        OssTimeBridge.resetPreSyncStateForTest();
+
+        FakeClientConfiguration cfg = new FakeClientConfiguration();
+        FakeServiceClient client = new FakeServiceClient(cfg);
+        FakeExecutionContext ctx = new FakeExecutionContext();
+        FakeSigner signer = new FakeSigner();
+        ctx.signer = signer;
+        FakeRequestMessage req = new FakeRequestMessage();
+        req.endpoint = new URI("https://oss-cn-shanghai.aliyuncs.com/");
+
+        OssTimeBridge.beforeInitialSign(client, req, ctx);
+
+        cfg.tickOffset = 123L;
+        req.headers.put("Date", "old");
+        req.headers.put("Authorization", "old");
+
+        OssTimeBridge.resignForRetry(client, req, ctx, 1);
+
+        long expected = OssTimeBridge.currentTickOffsetMillis();
+        Assert.assertTrue(Math.abs(signer.signerParams.tickOffset - expected) < 200L);
+        Assert.assertNotEquals(123L, signer.signerParams.tickOffset);
     }
 
     @Test
