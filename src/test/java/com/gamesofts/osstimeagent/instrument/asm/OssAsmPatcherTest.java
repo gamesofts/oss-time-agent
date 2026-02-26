@@ -41,7 +41,8 @@ public class OssAsmPatcherTest {
         byte[] patched = OssAsmPatcher.patch("com/aliyun/oss/ClientConfiguration", original, stats);
         Assert.assertNotNull(patched);
         Assert.assertTrue(stats.classModified);
-        Assert.assertTrue("autoCorrectClockSkew ctor patch expected", stats.clientConfigClockSkewPatched);
+        Assert.assertFalse("ctor auto-correct patch not required for cross-version compatibility",
+                stats.clientConfigClockSkewPatched);
         Assert.assertTrue("setTickOffset hook patch expected", stats.clientConfigTickOffsetHookPatched);
     }
 

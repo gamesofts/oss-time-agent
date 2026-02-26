@@ -373,34 +373,10 @@ public final class OssAsmPatcher {
 
         public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
             MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
-            if ("<init>".equals(name)) {
-                return new ClientConfigurationCtorVisitor(mv, stats);
-            }
             if ("setTickOffset".equals(name) && "(J)V".equals(desc)) {
                 return new ClientConfigurationSetTickOffsetVisitor(mv, stats);
             }
             return mv;
-        }
-    }
-
-    private static final class ClientConfigurationCtorVisitor extends MethodVisitor {
-        private final PatchStats stats;
-
-        private ClientConfigurationCtorVisitor(MethodVisitor mv, PatchStats stats) {
-            super(Opcodes.ASM5, mv);
-            this.stats = stats;
-        }
-
-        public void visitInsn(int opcode) {
-            if (opcode == Opcodes.RETURN) {
-                super.visitVarInsn(Opcodes.ALOAD, 0);
-                super.visitInsn(Opcodes.ICONST_1);
-                super.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "com/aliyun/oss/ClientConfiguration",
-                        "setEnableAutoCorrectClockSkew", "(Z)V", false);
-                stats.classModified = true;
-                stats.clientConfigClockSkewPatched = true;
-            }
-            super.visitInsn(opcode);
         }
     }
 
