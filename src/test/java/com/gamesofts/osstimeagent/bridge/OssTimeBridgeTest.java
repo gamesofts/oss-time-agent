@@ -41,7 +41,7 @@ public class OssTimeBridgeTest {
     }
 
     @Test
-    public void testBeforeInitialSignPreSyncOnlyOnceGlobally() throws Exception {
+    public void testBeforeInitialSignPreSyncOnlyOnceGloballyAfterSuccess() throws Exception {
         final AtomicInteger calls = new AtomicInteger();
         final com.gamesofts.osstimeagent.time.RealTimeClock clock = new com.gamesofts.osstimeagent.time.RealTimeClock();
         OssTimeBridge.installClock(clock);
@@ -66,6 +66,7 @@ public class OssTimeBridgeTest {
         OssTimeBridge.beforeInitialSign(client, req, ctx);
         req.endpoint = new URI("https://oss-cn-shanghai.aliyuncs.com/");
         OssTimeBridge.beforeInitialSign(client, req, ctx);
+        OssTimeBridge.beforeInitialSign(client, req, ctx);
 
         Assert.assertEquals(1, calls.get());
         Assert.assertTrue(clock.currentTickOffsetMillis() > 0L);
@@ -74,7 +75,7 @@ public class OssTimeBridgeTest {
     }
 
     @Test
-    public void testBeforeInitialSignConcurrentPreSyncIsIdempotent() throws Exception {
+    public void testBeforeInitialSignConcurrentPreSyncIsIdempotentGlobally() throws Exception {
         final AtomicInteger calls = new AtomicInteger();
         OssTimeBridge.installClock(new com.gamesofts.osstimeagent.time.RealTimeClock());
         OssTimeBridge.installEndpointTimeSyncerForTest(new OssTimeBridge.EndpointTimeSyncer() {
@@ -118,7 +119,7 @@ public class OssTimeBridgeTest {
     }
 
     @Test
-    public void testBeforeInitialSignFailureDoesNotRetryGlobally() throws Exception {
+    public void testBeforeInitialSignFailureCanRetryGlobally() throws Exception {
         final AtomicInteger calls = new AtomicInteger();
         OssTimeBridge.installClock(new com.gamesofts.osstimeagent.time.RealTimeClock());
         OssTimeBridge.installEndpointTimeSyncerForTest(new OssTimeBridge.EndpointTimeSyncer() {
@@ -133,10 +134,9 @@ public class OssTimeBridgeTest {
         req.endpoint = new URI("https://oss-cn-qingdao.aliyuncs.com/");
 
         OssTimeBridge.beforeInitialSign(new Object(), req, new Object());
-        req.endpoint = new URI("https://oss-cn-hangzhou.aliyuncs.com/");
         OssTimeBridge.beforeInitialSign(new Object(), req, new Object());
 
-        Assert.assertEquals(1, calls.get());
+        Assert.assertEquals(2, calls.get());
     }
 
     @Test

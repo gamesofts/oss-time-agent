@@ -27,13 +27,12 @@ public final class OssTimeBridge {
     private static volatile boolean resignRetryWarned;
     private static volatile long lastConfigTickOffsetLogged = Long.MIN_VALUE;
     private static volatile EndpointTimeSyncer endpointTimeSyncer = new EndpointTimeSyncer() {
-        private final OssEndpointTimeSync delegate = new OssEndpointTimeSync();
-
         public OssEndpointTimeSync.SyncResult sync(URI endpoint, RealTimeClock c) throws Exception {
-            return delegate.sync(endpoint, c);
+            return new OssEndpointTimeSync().sync(endpoint, c);
         }
     };
-    private static final AtomicBoolean globalPreSyncAttempted = new AtomicBoolean(false);
+    private static final AtomicBoolean globalPreSyncSucceeded = new AtomicBoolean(false);
+    private static final AtomicBoolean globalPreSyncInFlight = new AtomicBoolean(false);
     private static final Object NULL_REFLECTION = new Object();
     private static final Map signMethodCache = new ConcurrentHashMap();
     private static final Map signerParamsFieldCache = new ConcurrentHashMap();
@@ -72,9 +71,6 @@ public final class OssTimeBridge {
     }
 
     public static void beforeInitialSign(Object serviceClient, Object requestMessage, Object executionContext) {
-        if (!globalPreSyncAttempted.compareAndSet(false, true)) {
-            return;
-        }
         if (requestMessage == null) {
             return;
         }
@@ -93,6 +89,12 @@ public final class OssTimeBridge {
             AgentLog.debug("OSS pre-sync skipped: " + t.toString());
             return;
         }
+        if (globalPreSyncSucceeded.get()) {
+            return;
+        }
+        if (!globalPreSyncInFlight.compareAndSet(false, true)) {
+            return;
+        }
 
         try {
             EndpointTimeSyncer syncer = endpointTimeSyncer;
@@ -102,6 +104,7 @@ public final class OssTimeBridge {
                 long syncedNow = result.getEstimatedServerMillis();
                 long tickOffset = currentTickOffsetMillis();
                 boolean appliedToSdk = applyPreSyncTickOffset(serviceClient, executionContext, syncedNow, tickOffset);
+                globalPreSyncSucceeded.set(true);
                 if (appliedToSdk) {
                     onConfigTickOffsetUpdatedFromPreSync(tickOffset);
                 }
@@ -109,13 +112,19 @@ public final class OssTimeBridge {
                         + ", tickOffset=" + tickOffset + "ms"
                         + ", time=" + syncedNow
                         + " (" + formatUtcTime(syncedNow) + ")"
+                        + ", insecureHttps=" + result.isInsecureHttpsUsed()
                         + ", appliedToSdk=" + appliedToSdk
                         + (result.getMethodUsed() == null ? "" : ", method=" + result.getMethodUsed()));
             } else {
-                logPreSyncFailure(endpointKey, "missing Date header or unsupported response");
+                String reason = result == null ? "sync result missing"
+                        : (result.getFailureReason() == null ? "missing Date header or unsupported response"
+                        : result.getFailureReason());
+                logPreSyncFailure(endpointKey, reason, isPreSyncInsecureHttpsUsed(endpoint, result));
             }
         } catch (Throwable t) {
-            logPreSyncFailure(endpointKey, t.toString());
+            logPreSyncFailure(endpointKey, t.toString(), false);
+        } finally {
+            globalPreSyncInFlight.set(false);
         }
     }
 
@@ -189,7 +198,8 @@ public final class OssTimeBridge {
     }
 
     static void resetPreSyncStateForTest() {
-        globalPreSyncAttempted.set(false);
+        globalPreSyncSucceeded.set(false);
+        globalPreSyncInFlight.set(false);
     }
 
     private static void clearSignatureHeaders(Object requestMessage) throws Exception {
@@ -422,8 +432,19 @@ public final class OssTimeBridge {
         return sb.toString();
     }
 
-    private static void logPreSyncFailure(String endpointKey, String reason) {
-        String msg = "OSS endpoint pre-sync failed: " + endpointKey + " (" + reason + ")";
+    private static boolean isPreSyncInsecureHttpsUsed(URI endpoint, OssEndpointTimeSync.SyncResult result) {
+        if (result != null && result.isSuccess()) {
+            return result.isInsecureHttpsUsed();
+        }
+        if (endpoint == null) {
+            return false;
+        }
+        return "https".equalsIgnoreCase(endpoint.getScheme());
+    }
+
+    private static void logPreSyncFailure(String endpointKey, String reason, boolean insecureHttps) {
+        String msg = "OSS endpoint pre-sync failed: " + endpointKey + " (" + reason + ", insecureHttps="
+                + insecureHttps + ")";
         AgentLog.warn(msg);
     }
 

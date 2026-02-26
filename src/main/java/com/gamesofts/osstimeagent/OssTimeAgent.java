@@ -1,7 +1,6 @@
 package com.gamesofts.osstimeagent;
 
 import com.gamesofts.osstimeagent.bridge.OssTimeBridge;
-import com.gamesofts.osstimeagent.config.AgentConfig;
 import com.gamesofts.osstimeagent.instrument.OssSdkTransformer;
 import com.gamesofts.osstimeagent.time.RealTimeClock;
 import com.gamesofts.osstimeagent.util.AgentLog;
@@ -16,15 +15,7 @@ public final class OssTimeAgent {
     }
 
     public static void premain(String agentArgs, Instrumentation inst) {
-        AgentConfig config;
-        try {
-            config = AgentConfig.parse(agentArgs);
-        } catch (Throwable t) {
-            AgentLog.warn("failed to parse agent args, agent disabled", t);
-            return;
-        }
-
-        AgentLog.setLevel(config.getLogLevel());
+        AgentLog.setLevel("info");
 
         RealTimeClock clock = new RealTimeClock();
         OssTimeBridge.installClock(clock);
@@ -92,13 +83,6 @@ public final class OssTimeAgent {
         summary.hit = hit;
         summary.failed = failed;
         return summary;
-    }
-
-    private static String sanitize(String agentArgs) {
-        if (agentArgs == null) {
-            return "";
-        }
-        return agentArgs;
     }
 
     private static final class RetransformSummary {

@@ -1,22 +1,35 @@
 package com.gamesofts.osstimeagent.time;
 
+import org.junit.After;
 import org.junit.Assert;
 import org.junit.Test;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.net.URL;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URI;
+import java.security.Principal;
+import java.security.cert.Certificate;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 import java.util.TimeZone;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLHandshakeException;
+import javax.net.ssl.SSLSocketFactory;
 
 public class OssEndpointTimeSyncTest {
+    @After
+    public void tearDown() {
+        OssEndpointTimeSync.resetConnectionOpenerForTest();
+    }
+
     @Test
     public void testSyncAccepts404WithDateHeader() throws Exception {
         final long serverTime = System.currentTimeMillis() + 5000L;
@@ -95,6 +108,26 @@ public class OssEndpointTimeSyncTest {
         } finally {
             server.close();
         }
+    }
+
+    @Test
+    public void testSyncUsesInsecureHttpsByDefault() throws Exception {
+        final long serverTime = System.currentTimeMillis() + 5000L;
+        final FakeHttpsURLConnection conn = new FakeHttpsURLConnection(new URL("https://example.com/"), serverTime, false);
+        OssEndpointTimeSync.installConnectionOpenerForTest(new OssEndpointTimeSync.ConnectionOpener() {
+            public java.net.HttpURLConnection open(URL url) {
+                return conn;
+            }
+        });
+
+        RealTimeClock clock = new RealTimeClock();
+        OssEndpointTimeSync.SyncResult result = new OssEndpointTimeSync().sync(new URI("https://example.com/"), clock);
+
+        Assert.assertTrue(result.isSuccess());
+        Assert.assertEquals("HEAD", result.getMethodUsed());
+        Assert.assertTrue(result.isInsecureHttpsUsed());
+        Assert.assertTrue(conn.sslSocketFactorySet);
+        Assert.assertTrue(conn.hostnameVerifierSet);
     }
 
     private static String httpDate(long millis) {
@@ -193,6 +226,75 @@ public class OssEndpointTimeSyncTest {
             int i = index.getAndIncrement();
             Responder responder = responders[i < responders.length ? i : responders.length - 1];
             responder.respond(method, socket.getOutputStream());
+        }
+    }
+
+    static final class FakeHttpsURLConnection extends HttpsURLConnection {
+        private final long serverTimeMillis;
+        private final boolean failOnConnect;
+        boolean sslSocketFactorySet;
+        boolean hostnameVerifierSet;
+
+        FakeHttpsURLConnection(URL u, long serverTimeMillis, boolean failOnConnect) {
+            super(u);
+            this.serverTimeMillis = serverTimeMillis;
+            this.failOnConnect = failOnConnect;
+        }
+
+        public void connect() throws java.io.IOException {
+            if (failOnConnect && !(sslSocketFactorySet && hostnameVerifierSet)) {
+                throw new SSLHandshakeException("self signed certificate in certificate chain");
+            }
+            connected = true;
+        }
+
+        public void disconnect() {
+            connected = false;
+        }
+
+        public boolean usingProxy() {
+            return false;
+        }
+
+        public int getResponseCode() {
+            return 403;
+        }
+
+        public long getHeaderFieldDate(String name, long Default) {
+            if ("Date".equalsIgnoreCase(name)) {
+                return serverTimeMillis;
+            }
+            return Default;
+        }
+
+        public void setSSLSocketFactory(SSLSocketFactory sf) {
+            super.setSSLSocketFactory(sf);
+            sslSocketFactorySet = (sf != null);
+        }
+
+        public void setHostnameVerifier(HostnameVerifier v) {
+            super.setHostnameVerifier(v);
+            hostnameVerifierSet = (v != null);
+        }
+
+        public String getCipherSuite() {
+            return "TLS_FAKE";
+        }
+
+        public Certificate[] getLocalCertificates() {
+            return null;
+        }
+
+        public Certificate[] getServerCertificates() {
+            return null;
+        }
+
+        public Principal getPeerPrincipal() {
+            return null;
+        }
+
+        public Principal getLocalPrincipal() {
+            return null;
         }
     }
 }

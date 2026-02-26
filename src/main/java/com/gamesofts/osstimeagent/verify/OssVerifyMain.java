@@ -5,9 +5,12 @@ import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSClientBuilder;
 import com.aliyun.oss.common.auth.CredentialsProviderFactory;
 import com.aliyun.oss.common.auth.DefaultCredentialProvider;
-import com.aliyun.oss.model.OSSObject;
+import com.aliyun.oss.model.CopyObjectResult;
 import com.aliyun.oss.model.ObjectListing;
+import com.aliyun.oss.model.ObjectMetadata;
+import com.aliyun.oss.model.OSSObject;
 import com.aliyun.oss.model.PutObjectResult;
+import com.aliyun.oss.model.SimplifiedObjectMeta;
 
 import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
@@ -15,11 +18,14 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
 public class OssVerifyMain {
+    private static final int STREAM_BYTES = 256 * 1024;
+
     public static void main(String[] args) throws Exception {
         Map<String, String> cfg = loadSimpleJson(new File("config.json"));
         String endpoint = cfg.get("endpoint");
@@ -36,8 +42,14 @@ public class OssVerifyMain {
 
         ClientBuilderConfiguration conf = new ClientBuilderConfiguration();
         OSS client = null;
-        String key = "oss-time-agent-verify-" + System.currentTimeMillis() + "-" + UUID.randomUUID().toString() + ".txt";
+        String basePrefix = "oss-time-agent-verify-" + System.currentTimeMillis() + "-" + UUID.randomUUID().toString();
+        String baseKey = basePrefix + "-base.txt";
+        String streamKey = basePrefix + "-stream.bin";
+        String copyKey = basePrefix + "-copy.txt";
         String payload = "oss-time-agent-verify-payload-" + System.currentTimeMillis();
+        byte[] payloadBytes = payload.getBytes("UTF-8");
+        byte[] streamBytes = buildPatternBytes(STREAM_BYTES);
+
         try {
             DefaultCredentialProvider provider = CredentialsProviderFactory.newDefaultCredentialProvider(ak, sk);
             client = new OSSClientBuilder().build(endpoint, provider, conf);
@@ -49,32 +61,34 @@ public class OssVerifyMain {
             ObjectListing listing = client.listObjects(bucket);
             System.out.println("LIST_OK count=" + listing.getObjectSummaries().size());
 
-            PutObjectResult putResult = client.putObject(bucket, key,
-                    new ByteArrayInputStream(payload.getBytes("UTF-8")));
-            System.out.println("PUT_OK key=" + key + " etag=" + putResult.getETag());
+            PutObjectResult putResult = client.putObject(bucket, baseKey, new ByteArrayInputStream(payloadBytes));
+            System.out.println("PUT_OK key=" + baseKey + " etag=" + putResult.getETag());
 
-            OSSObject obj = client.getObject(bucket, key);
-            String downloaded;
-            try {
-                downloaded = readAllAsUtf8(obj.getObjectContent());
-            } finally {
-                obj.close();
-            }
+            verifySimplifiedMeta(client, bucket, baseKey, payloadBytes.length, putResult.getETag());
+            verifyObjectExists(client, bucket, baseKey, true, false);
+            verifyBaseObjectGet(client, bucket, baseKey, payload);
 
-            if (!payload.equals(downloaded)) {
-                System.err.println("GET_MISMATCH key=" + key + " expected=" + payload + " actual=" + downloaded);
-                safeDelete(client, bucket, key);
-                System.exit(3);
-                return;
-            }
-            System.out.println("GET_OK key=" + key + " bytes=" + downloaded.getBytes("UTF-8").length);
+            verifyStreamPutAndGet(client, bucket, streamKey, streamBytes);
 
-            client.deleteObject(bucket, key);
-            System.out.println("DELETE_OK key=" + key);
+            CopyObjectResult copyResult = verifyCopy(client, bucket, baseKey, copyKey);
+            verifyCopyMeta(client, bucket, copyKey, payloadBytes.length, copyResult.getETag());
+            verifyCopiedObjectContent(client, bucket, copyKey, payload);
+
+            client.deleteObject(bucket, baseKey);
+            System.out.println("DELETE_OK key=" + baseKey);
+            client.deleteObject(bucket, streamKey);
+            System.out.println("DELETE_OK key=" + streamKey);
+            client.deleteObject(bucket, copyKey);
+            System.out.println("DELETE_OK key=" + copyKey);
+
+            verifyObjectExists(client, bucket, baseKey, false, true);
             System.out.println("VERIFY_DONE");
         } catch (Throwable t) {
             System.err.println("VERIFY_FAILED " + t.getClass().getName() + ": " + t.getMessage());
             t.printStackTrace(System.err);
+            if (client != null) {
+                safeDeleteAll(client, bucket, new String[] { baseKey, streamKey, copyKey });
+            }
             if (t instanceof Exception) {
                 throw (Exception) t;
             }
@@ -86,12 +100,193 @@ public class OssVerifyMain {
         }
     }
 
+    private static void verifyBaseObjectGet(OSS client, String bucket, String key, String expectedPayload) throws Exception {
+        OSSObject obj = client.getObject(bucket, key);
+        String downloaded;
+        try {
+            downloaded = readAllAsUtf8(obj.getObjectContent());
+        } finally {
+            obj.close();
+        }
+        if (!expectedPayload.equals(downloaded)) {
+            throw new IllegalStateException("GET_MISMATCH key=" + key + " expected=" + expectedPayload + " actual=" + downloaded);
+        }
+        System.out.println("GET_OK key=" + key + " bytes=" + downloaded.getBytes("UTF-8").length);
+    }
+
+    private static void verifyObjectExists(OSS client, String bucket, String key, boolean expected, boolean afterDelete)
+            throws Exception {
+        boolean actual = client.doesObjectExist(bucket, key);
+        if (actual != expected) {
+            throw new IllegalStateException("EXISTS_MISMATCH key=" + key + " expected=" + expected + " actual=" + actual);
+        }
+        System.out.println("EXISTS_OK key=" + key + " exists=" + actual + (afterDelete ? " (after delete)" : ""));
+    }
+
+    private static void verifyStreamPutAndGet(OSS client, String bucket, String key, byte[] expectedBytes) throws Exception {
+        ObjectMetadata metadata = new ObjectMetadata();
+        metadata.setContentLength(expectedBytes.length);
+        metadata.setContentType("application/octet-stream");
+        PutObjectResult putResult = client.putObject(bucket, key, new ByteArrayInputStream(expectedBytes), metadata);
+        if (putResult == null || putResult.getETag() == null || putResult.getETag().length() == 0) {
+            throw new IllegalStateException("STREAM_MISMATCH key=" + key + " put etag empty");
+        }
+        System.out.println("STREAM_PUT_OK key=" + key + " bytes=" + expectedBytes.length + " etag=" + putResult.getETag());
+
+        OSSObject obj = client.getObject(bucket, key);
+        byte[] actualBytes;
+        try {
+            actualBytes = readAllBytes(obj.getObjectContent());
+        } finally {
+            obj.close();
+        }
+
+        assertBytesEqual("STREAM_MISMATCH key=" + key, expectedBytes, actualBytes);
+        System.out.println("STREAM_GET_OK key=" + key + " bytes=" + actualBytes.length);
+    }
+
+    private static CopyObjectResult verifyCopy(OSS client, String bucket, String srcKey, String dstKey) throws Exception {
+        CopyObjectResult result = client.copyObject(bucket, srcKey, bucket, dstKey);
+        if (result == null) {
+            throw new IllegalStateException("COPY_MISMATCH key=" + dstKey + " result=null");
+        }
+        if (result.getETag() == null || result.getETag().length() == 0) {
+            throw new IllegalStateException("COPY_MISMATCH key=" + dstKey + " etag=empty");
+        }
+        Date lastModified = result.getLastModified();
+        if (lastModified == null) {
+            throw new IllegalStateException("COPY_MISMATCH key=" + dstKey + " lastModified=null");
+        }
+        System.out.println("COPY_OK key=" + dstKey + " etag=" + result.getETag());
+        return result;
+    }
+
+    private static void verifyCopyMeta(OSS client, String bucket, String key, int expectedSize, String expectedEtag)
+            throws Exception {
+        SimplifiedObjectMeta meta = client.getSimplifiedObjectMeta(bucket, key);
+        if (meta == null) {
+            throw new IllegalStateException("COPY_MISMATCH key=" + key + " meta=null");
+        }
+        if (meta.getSize() != expectedSize) {
+            throw new IllegalStateException("COPY_MISMATCH key=" + key + " size=" + meta.getSize()
+                    + " expected=" + expectedSize);
+        }
+        String etag = meta.getETag();
+        if (etag == null || etag.length() == 0) {
+            throw new IllegalStateException("COPY_MISMATCH key=" + key + " etag=empty");
+        }
+        if (expectedEtag != null && expectedEtag.length() > 0 && !expectedEtag.equalsIgnoreCase(etag)) {
+            throw new IllegalStateException("COPY_MISMATCH key=" + key + " etag=" + etag
+                    + " expected=" + expectedEtag);
+        }
+        if (meta.getLastModified() == null) {
+            throw new IllegalStateException("COPY_MISMATCH key=" + key + " lastModified=null");
+        }
+        System.out.println("COPY_META_OK key=" + key + " size=" + meta.getSize() + " etag=" + etag);
+    }
+
+    private static void verifyCopiedObjectContent(OSS client, String bucket, String key, String expectedPayload) throws Exception {
+        OSSObject obj = client.getObject(bucket, key);
+        String downloaded;
+        try {
+            downloaded = readAllAsUtf8(obj.getObjectContent());
+        } finally {
+            obj.close();
+        }
+        if (!expectedPayload.equals(downloaded)) {
+            throw new IllegalStateException("COPY_MISMATCH key=" + key + " expected=" + expectedPayload + " actual=" + downloaded);
+        }
+        System.out.println("COPY_GET_OK key=" + key + " bytes=" + downloaded.getBytes("UTF-8").length);
+    }
+
     private static void safeDelete(OSS client, String bucket, String key) {
         try {
             client.deleteObject(bucket, key);
             System.out.println("DELETE_OK key=" + key + " (cleanup)");
         } catch (Throwable t) {
             System.err.println("DELETE_FAILED key=" + key + " " + t.toString());
+        }
+    }
+
+    private static void safeDeleteAll(OSS client, String bucket, String[] keys) {
+        if (keys == null) {
+            return;
+        }
+        int i;
+        for (i = 0; i < keys.length; i++) {
+            String key = keys[i];
+            if (key == null || key.length() == 0) {
+                continue;
+            }
+            safeDelete(client, bucket, key);
+        }
+    }
+
+    private static void verifySimplifiedMeta(OSS client, String bucket, String key, int expectedSize, String expectedEtag)
+            throws Exception {
+        SimplifiedObjectMeta meta = client.getSimplifiedObjectMeta(bucket, key);
+        if (meta == null) {
+            throw new IllegalStateException("META_MISMATCH key=" + key + " meta=null");
+        }
+        if (meta.getSize() != expectedSize) {
+            throw new IllegalStateException("META_MISMATCH key=" + key + " size=" + meta.getSize()
+                    + " expected=" + expectedSize);
+        }
+        String etag = meta.getETag();
+        if (etag == null || etag.length() == 0) {
+            throw new IllegalStateException("META_MISMATCH key=" + key + " etag=empty");
+        }
+        if (expectedEtag != null && expectedEtag.length() > 0 && !expectedEtag.equalsIgnoreCase(etag)) {
+            throw new IllegalStateException("META_MISMATCH key=" + key + " etag=" + etag
+                    + " expected=" + expectedEtag);
+        }
+        if (meta.getLastModified() == null) {
+            throw new IllegalStateException("META_MISMATCH key=" + key + " lastModified=null");
+        }
+        System.out.println("SIMPLIFIED_META_OK key=" + key + " size=" + meta.getSize() + " etag=" + etag);
+    }
+
+    private static byte[] buildPatternBytes(int size) {
+        byte[] data = new byte[size];
+        int i;
+        for (i = 0; i < data.length; i++) {
+            data[i] = (byte) (i % 251);
+        }
+        return data;
+    }
+
+    private static void assertBytesEqual(String prefix, byte[] expected, byte[] actual) {
+        if (expected == null || actual == null) {
+            throw new IllegalStateException(prefix + " null-bytes expected=" + (expected == null)
+                    + " actual=" + (actual == null));
+        }
+        if (expected.length != actual.length) {
+            throw new IllegalStateException(prefix + " size=" + actual.length + " expected=" + expected.length);
+        }
+        int i;
+        for (i = 0; i < expected.length; i++) {
+            if (expected[i] != actual[i]) {
+                throw new IllegalStateException(prefix + " firstDiffIndex=" + i);
+            }
+        }
+    }
+
+    private static byte[] readAllBytes(InputStream in) throws Exception {
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            while (true) {
+                int n = in.read(buf);
+                if (n < 0) {
+                    break;
+                }
+                out.write(buf, 0, n);
+            }
+            return out.toByteArray();
+        } finally {
+            if (in != null) {
+                in.close();
+            }
         }
     }
 
